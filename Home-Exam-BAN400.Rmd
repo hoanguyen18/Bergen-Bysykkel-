@@ -1,0 +1,321 @@
+---
+title: "Home Exam - BAN400"
+author: "Nguyen Thi Hoa"
+date: "12/20/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+Bergen Bysykkel (https://bergenbysykkel.no) is a company that rents out bicycles in Bergen. They also release data through an open API.
+
+# Load all needed packages 
+
+```{r message=FALSE}
+library(tidyverse)
+library(jsonlite)
+library(dplyr)
+library(data.table)
+library(magrittr)
+library(assertthat)
+library(tidyr)
+library(dplyr)
+library(purrr)
+library(tidymodels)
+library(lubridate)
+library(sf)          # For spatial data, co-authoured by NHH Prof. Roger Bivand 
+library(ggmap)       # For downloading streetmaps as ggplot2-objects.
+```
+
+# Problem 1: 
+
+Download data for January 2021 in both .json and .csv-format. Use the lines below to load in the data frame from the .csv:
+
+```{r message=FALSE}
+df_202101_csv <- read_csv("data/01.csv") %>% 
+  mutate(across(c("start_station_latitude", "start_station_longitude", "end_station_latitude", "end_station_longitude"), function(x) signif(x, digits=15)))
+dim(df_202101_csv)
+```
+
+**(a) Read in the .json-file for January 2021. Write a pipeline that transforms it into a data frame with the same columns/format as the .csv-file. Save the data frame as df_202101_json.**
+
+```{r}
+df_202101_json <- fromJSON("data/01.json")
+
+#Transfrom json dataframe with same format as csv dataframe
+
+df_202101_json <- df_202101_json %>% 
+  mutate(started_at = as.POSIXct(.$started_at,tz="UTC"),
+         ended_at = as.POSIXct(.$ended_at,tz="UTC"),
+         start_station_id = as.double(.$start_station_id ),
+         end_station_id = as.double(.$end_station_id),
+         duration = as.double(.$duration) 
+  ) %>% 
+  mutate(across(where(is.character), str_trim)) %>% 
+  mutate(across(c("start_station_latitude", "start_station_longitude", "end_station_latitude", "end_station_longitude"), function(x) signif(x, digits=15)))
+  
+dim(df_202101_json)
+```
+
+**(b) Write a test that checks that df_202101_json and df_202101_csv should have the same columns, and the same values in all columns.(Hint: Use anti_join() from the dplyr package).**
+
+```{r}
+anti_join(df_202101_csv, df_202101_json)
+```
+
+# Problem 2: 
+
+Create a data set with the following properties
+
+• The data set should have one observation for every station, date and hour of day.
+
+• There should be one column n_rides, counting how many rides started at the station at the given day/hour.
+
+• The columns of the final data set should be:
+
+– start_station_id (dbl): station ID.
+
+– floor_start_dh (POSIXct, e.g. ’2021-04-01 13:00:00”): giving the start datetime
+of the row.
+
+– start_hour (factor): 0-23 numbers indicating which hour an observation belongs to
+
+– weekday_start (factor): numeric representation of weekdays
+
+– n_rides (dbl): count of rides each hour, i.e. a count of all rides from
+floor_start_dh to floor_start_dh + 1 hour.
+
+• There should be no observations before/after the stations were operational. Use your judgment to assess what the valid date ranges are for each station.
+
+**Read in all bike rides from 01 Jan 2021 to 19 Dec 2021**
+
+```{r message=FALSE}
+# Get a List of all files in directory named with a key word, say all `.csv` files
+filenames <- list.files("data", pattern=".csv", full.names=TRUE)
+# read and row bind all data sets
+bike_rides_2021_data <- rbindlist(lapply(filenames,fread))
+```
+
+**Make a combination of observations for every station, date and hour of day.**
+
+```{r}
+start_station_id = as.double(unique(bike_rides_2021_data$start_station_id))
+floor_start_dh <- seq(as.POSIXct("2021-01-01 00:00:00"), as.POSIXct("2021-12-19 23:00:00"), by = "hours")
+df <- 
+  expand.grid(floor_start_dh, start_station_id) %>%
+  rename(floor_start_dh = Var1,
+         start_station_id = Var2) %>% 
+  arrange(start_station_id)
+head(df,10)
+```
+ 
+```{r}
+## Count of rides for each hour 
+bike_rides_2021 <- bike_rides_2021_data %>% 
+  mutate(start_date = format(as.POSIXct(.$started_at, '%Y-%m-%d %H:%M:%S'), '%Y-%m-%d %H:%00:%00')) %>% 
+  group_by(start_station_id, start_date) %>%
+  summarise(n_rides = n())
+# Change the class of start_date into date type (instead of character)
+bike_rides_2021$start_date <- as.POSIXct(bike_rides_2021$start_date )
+bike_rides_2021
+```
+
+
+```{r}
+#join the data and fill the NA value (no ride in that hour) as "0"
+df_agg <- left_join(df, bike_rides_2021, by = c("start_station_id" = "start_station_id", "floor_start_dh" = "start_date"))
+df_agg [is.na(df_agg )] <- 0
+```
+
+
+```{r}
+# create weekday start as 1-> 7 (Sunday=1 to Saturday=7), start_hour as 0 -> 23
+df_agg <- df_agg %>% 
+  mutate(start_hour=as.factor(hour(floor_start_dh)),weekday_start=as.factor(wday(floor_start_dh)))
+head(df_agg,10)
+```
+**Name the data set df_agg and show that the data set passes 2 tests below:**
+
+```{r}
+assert_that(df_agg %>%
+              group_by(start_station_id, floor_start_dh) %>%
+              summarise(n = n()) %>%
+              ungroup() %>%
+              summarise(max_n = max(n)) %$%
+              max_n == 1,
+            msg = "Duplicates on stations/hours/dates")
+assert_that(df_agg %>%
+              group_by(start_station_id) %>%
+              mutate(
+                timediff = floor_start_dh - lag(floor_start_dh,
+                                                order_by = floor_start_dh)
+                ) %>%
+              filter(as.numeric(timediff) != 1) %>%
+              nrow(.) == 0,
+            msg="Time diffs. between obs are not always 1 hour")
+```
+
+
+# Problem 3: 
+
+**(a) Estimate a linear regression model for each of the stations. Using factors for weekdays and hour of day as explanatory variables and n_rides as the response variable. Determine the exact specification as you see fit.**
+
+
+```{r summary}
+# Split input data into train set and test set (grouped by station id, train/test ratio is 3/1)
+by_station <- df_agg %>% group_by(start_station_id) %>% 
+  summarize(split = list(initial_time_split(cur_data()))) %>%
+  group_by(start_station_id) %>% 
+  mutate(data.train=list(training(split[[1]])),data.test=list(testing(split[[1]]))) %>%
+  select(!split)
+by_station
+map(setNames(by_station$data.train, by_station$start_station_id)[1:2], summary)
+map(setNames(by_station$data.test, by_station$start_station_id)[1:2], summary)
+```
+
+
+```{r}
+# A function that fits the linear regression model to each station
+station_model <- function(df) {
+  lm(n_rides~weekday_start + start_hour, data=df)
+}
+# put the linear model to each station by using purrr:map() to apply the model to each element
+models <- map(by_station$data.train, station_model)
+# Put the model inside a mutate
+by_station <- by_station %>%
+  group_by(start_station_id) %>%
+  mutate(model = map(data.train, station_model)) %>% 
+  ungroup()
+by_station
+```
+
+```{r}
+# Check models of station 2 and station 3
+by_station %>% 
+  filter(start_station_id == 2) %>% 
+  pluck("model", 1) %>% 
+  summary()
+
+by_station %>% 
+  filter(start_station_id == 3) %>% 
+  pluck("model", 1) %>% 
+  summary()
+```
+ 
+**(b) Predict the number of rides for each hour of day, weekday and station using these
+regression models. Collect the predictions in a data structure, together with the station ID.**
+
+
+```{r prediction}
+by_station <- by_station %>%
+  group_by(start_station_id) %>%
+  mutate(predictions = list(predict(model[[1]], newdata=data.test[[1]]))) %>%
+  ungroup()
+by_station
+
+```
+
+```{r}
+
+prediction_df_from_station_nr <- function(station_nr) {
+  by_station %>%
+  filter(start_station_id == station_nr) %>%
+  ungroup() %>%
+  select(c(data.test, predictions)) %>%
+  unnest(c(data.test, predictions)) %>%
+  mutate(start_station_id = station_nr)
+}
+
+predictions_from_all_stations <- bind_rows(map(by_station$start_station_id, prediction_df_from_station_nr))
+predictions_from_all_stations
+```
+
+**(c) Create a set of plots showing the predicted number of bicycle rides throughout an entire week.**
+
+Place predicted volume on the y-axis and the hour of day on the x-axis. 
+Make one plot per day of week. 
+Use different colors for each station, and format the plots as appropriate.
+
+```{r, fig.height = 7, fig.width = 7, dpi=96}
+
+predictions_from_all_stations %>%
+  filter(floor_start_dh > "2021-10-01 00:00:00", floor_start_dh <= "2021-10-08 00:00:00") %>%
+    ggplot(aes(x = as.numeric(start_hour), y = predictions, color = factor(start_station_id))) +
+    geom_line() +
+    labs(
+      x="start_hour",
+      y="predictions",
+      colour="start_station_id",
+      title="Hourly bicycle ride count prediction per station from 2021-10-01 to 2021-10-07",
+      ) + 
+    facet_wrap(vars(weekday_start), scales="fixed", ncol=1)
+```
+
+
+# Problem 4: 
+Create a function with the following specifications
+
+• The function should, as a minimum, take as arguments the date and the hour.
+
+• The function should return a plot with the following properties:
+
+– The latitude and the longitude should be mapped to the x and the y-axis respectively.
+
+– The plot should give information about the traffic volume (or predicted traffic
+volume) for each of the stations in the data set at the given time.
+
+– The plot should be well formatted.
+
+Note that the latitude and longitude of the stations may change over time. Use your best judgement to overcome this problem in order to make a figure that informs the reader of where bicycle traffic is originating from in Bergen at given times.
+
+```{r} 
+# The latitude and longitude of the stations may change over time -> calculate the average lon and lat of each station through time
+station  <- bike_rides_2021_data %>% select(start_station_id, start_station_longitude, start_station_latitude) %>% 
+  group_by(start_station_id) %>% 
+  summarise(lon = sum(start_station_longitude)/n(), lat = sum(start_station_latitude)/n())
+station
+```
+
+```{r}
+# join data of lon and lat of each station into the df_agg
+df_agg_lonlat <- left_join(df_agg, station , by = c("start_station_id" = "start_station_id"))
+
+head(df_agg_lonlat,10)
+```
+
+**Create a function**
+
+```{r}
+plot_map <- function (date_and_hour) {
+  df <- filter(df_agg_lonlat, floor_start_dh == date_and_hour)
+  bergen <- make_bbox(df$lon, 
+          df$lat, 
+          f = .05)
+  m <- get_map(bergen, source = "osm")
+ggmap(m) + 
+  geom_point(aes(x = lon, y = lat, size = n_rides, colour = n_rides), data = df) + 
+  scale_colour_gradientn(colours = terrain.colors(9)) +
+  geom_text(data = df, aes(label=n_rides), size = 2) +
+  labs(
+      x="longitude",
+      y="latitude",
+      colour="number of rides",
+      size = "number of rides",
+      title = paste0("Bicycle traffic volume in Bergen at ", date_and_hour)
+      ) +
+  theme(axis.text.x = element_text(angle=-90, hjust=0, vjust=1), 
+     plot.title = element_text(size = 12, face = "bold", colour = "black", hjust = 0.5))}
+```
+
+```{r}
+# test the plot with a specific date and hour
+plot_map("2021-06-08 13:00:00")
+```
+```{r}
+plot_map("2021-10-08 16:00:00")
+```
+
+
+
